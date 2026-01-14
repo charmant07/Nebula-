@@ -1,0 +1,285 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { X, Mic, MicOff, Camera, Sparkles, AlertCircle } from 'lucide-react';
+
+const App = () => {
+  const [status, setStatus] = useState('ready'); // ready, listening, thinking, speaking
+  const [isMuted, setIsMuted] = useState(false);
+  const [visionMode, setVisionMode] = useState(false);
+  const [response, setResponse] = useState("");
+  const [error, setError] = useState(null);
+  const [conversationHistory, setConversationHistory] = useState([]);
+
+  const apiKey = ""; // Environment provides this at runtime
+  const recognitionRef = useRef(null);
+  const audioRef = useRef(null);
+
+  // Helper: Convert PCM16 data to a playable WAV Blob
+  const pcmToWav = (base64Pcm, sampleRate = 24000) => {
+    const binaryString = window.atob(base64Pcm);
+    const len = binaryString.length;
+    const bytes = new Uint8Array(len);
+    for (let i = 0; i < len; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+
+    const buffer = new ArrayBuffer(44 + bytes.length);
+    const view = new DataView(buffer);
+
+    // RIFF chunk descriptor
+    view.setUint32(0, 0x52494646, false); // "RIFF"
+    view.setUint32(4, 36 + bytes.length, true);
+    view.setUint32(8, 0x57415645, false); // "WAVE"
+    // FMT sub-chunk
+    view.setUint32(12, 0x666d7420, false); // "fmt "
+    view.setUint32(16, 16, true); // Subchunk1Size
+    view.setUint16(20, 1, true); // AudioFormat (PCM)
+    view.setUint16(22, 1, true); // NumChannels (Mono)
+    view.setUint32(24, sampleRate, true); // SampleRate
+    view.setUint32(28, sampleRate * 2, true); // ByteRate
+    view.setUint16(32, 2, true); // BlockAlign
+    view.setUint16(34, 16, true); // BitsPerSample
+    // Data sub-chunk
+    view.setUint32(36, 0x64617461, false); // "data"
+    view.setUint32(40, bytes.length, true);
+
+    // Write PCM samples
+    for (let i = 0; i < bytes.length; i++) {
+      view.setUint8(44 + i, bytes[i]);
+    }
+
+    return new Blob([buffer], { type: 'audio/wav' });
+  };
+
+  // Initialize Speech Recognition
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (SpeechRecognition) {
+      recognitionRef.current = new SpeechRecognition();
+      recognitionRef.current.continuous = false;
+      recognitionRef.current.interimResults = false;
+      recognitionRef.current.lang = 'en-US';
+
+      recognitionRef.current.onresult = (event) => {
+        const transcript = event.results[0][0].transcript;
+        getGeminiResponse(transcript);
+      };
+
+      recognitionRef.current.onerror = (event) => {
+        if (event.error !== 'no-speech') {
+          setError(`Microphone error: ${event.error}`);
+          setStatus('ready');
+        }
+      };
+
+      recognitionRef.current.onend = () => {
+        if (status === 'listening') setStatus('thinking');
+      };
+    } else {
+      setError("Speech API not supported.");
+    }
+  }, [status]);
+
+  // Gemini TTS integration with proper playback
+  const speakResponse = async (text) => {
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text: `Say naturally: ${text}` }] }],
+          generationConfig: {
+            responseModalities: ["AUDIO"],
+            speechConfig: {
+              voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } }
+            }
+          }
+        })
+      });
+
+      const result = await res.json();
+      const pcmData = result.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+
+      if (pcmData) {
+        setStatus('speaking');
+        const wavBlob = pcmToWav(pcmData, 24000);
+        const audioUrl = URL.createObjectURL(wavBlob);
+        
+        if (audioRef.current) {
+          audioRef.current.src = audioUrl;
+          audioRef.current.play();
+          audioRef.current.onended = () => {
+            setStatus('ready');
+            URL.revokeObjectURL(audioUrl);
+          };
+        }
+      } else {
+        setStatus('ready');
+      }
+    } catch (err) {
+      console.error("TTS Error:", err);
+      setStatus('ready');
+    }
+  };
+
+  const getGeminiResponse = async (userInput) => {
+    setStatus('thinking');
+    setResponse("");
+    
+    // Add user message to conversation history
+    const newHistory = [
+      ...conversationHistory,
+      {
+        role: "user",
+        parts: [{ text: userInput }]
+      }
+    ];
+    
+    const callApi = async (retry = 0) => {
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: newHistory,
+            systemInstruction: {
+              parts: [{ 
+                text: "You are Nebule, a friendly and engaging AI companion with perfect memory and web search capabilities. You're conversational, witty, and genuinely interested in the user. Remember everything discussed and reference it naturally. When you need current information, real-time data, or facts beyond your knowledge, use the google_search tool. Give thoughtful, complete responses (2-4 sentences). Be warm, helpful, and show personality. No markdown. Speak naturally like a good friend who actually cares about the conversation." 
+              }]
+            },
+            tools: [{
+              googleSearch: {}
+            }]
+          })
+        });
+
+        if (!res.ok && retry < 5) {
+          await new Promise(r => setTimeout(r, Math.pow(2, retry) * 1000));
+          return callApi(retry + 1);
+        }
+
+        const data = await res.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "I couldn't hear that.";
+        
+        // Add assistant response to conversation history
+        setConversationHistory([
+          ...newHistory,
+          {
+            role: "model",
+            parts: [{ text: text }]
+          }
+        ]);
+        
+        setResponse(text);
+        speakResponse(text);
+      } catch (err) {
+        setError("Connection error.");
+        setStatus('ready');
+      }
+    };
+
+    callApi();
+  };
+
+  const handleInteraction = () => {
+    if (audioRef.current) audioRef.current.pause(); // Stop existing speech
+    if (status === 'ready' || status === 'speaking') {
+      setError(null);
+      try {
+        recognitionRef.current.start();
+        setStatus('listening');
+      } catch (err) { console.error(err); }
+    } else if (status === 'listening') {
+      recognitionRef.current.stop();
+      setStatus('thinking');
+    }
+  };
+
+  const handleReset = () => {
+    setStatus('ready');
+    setResponse("");
+    setError(null);
+    setConversationHistory([]); // Clear memory on reset
+  };
+
+  return (
+    <div className="flex h-screen w-full bg-[#050505] text-white font-sans overflow-hidden items-center justify-center">
+      <audio ref={audioRef} className="hidden" />
+      
+      <div className={`absolute inset-0 transition-opacity duration-1000 ${visionMode ? 'opacity-20' : 'opacity-0'}`}>
+        <div className="absolute inset-0 bg-gradient-to-b from-indigo-500/20 to-transparent" />
+      </div>
+
+      <div className={`absolute top-[15%] transition-all duration-1000 flex flex-col items-center ${status === 'ready' ? 'opacity-20' : 'opacity-100'}`}>
+        <p className="text-sm font-light tracking-[0.3em] uppercase text-white/70">
+          {error ? "Error" : status}
+        </p>
+        {error && (
+          <div className="mt-4 flex items-center gap-2 text-red-400 text-xs bg-red-400/10 px-4 py-2 rounded-full border border-red-400/20">
+            <AlertCircle size={14} /> {error}
+          </div>
+        )}
+        {response && status === 'speaking' && !error && (
+           <p className="mt-4 text-center max-w-md text-white/40 italic text-sm animate-pulse px-6">"{response}"</p>
+        )}
+      </div>
+
+      <div className="relative w-64 h-64 md:w-80 md:h-80 cursor-pointer transition-transform active:scale-95" onClick={handleInteraction}>
+        <div className={`absolute inset-0 rounded-full blur-[100px] transition-all duration-1000 scale-150 ${
+          status === 'speaking' ? 'bg-blue-500/30' : 
+          status === 'listening' ? 'bg-indigo-500/30' : 
+          status === 'thinking' ? 'bg-purple-500/20' : 'bg-transparent'
+        }`} />
+
+        <svg className="w-full h-full filter-goo" viewBox="0 0 200 200">
+          <defs>
+            <filter id="goo">
+              <feGaussianBlur in="SourceGraphic" stdDeviation="8" result="blur" />
+              <feColorMatrix in="blur" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 19 -9" />
+              <feComposite in="SourceGraphic" in2="goo" operator="atop" />
+            </filter>
+          </defs>
+          <g filter="url(#goo)">
+            <circle cx="100" cy="100" r="40" className={`transition-all duration-1000 ${status === 'ready' ? 'fill-white opacity-10 scale-75' : status === 'thinking' ? 'fill-purple-400 opacity-80' : 'fill-white opacity-100'}`} />
+            {status !== 'ready' && (
+              <>
+                <circle cx="100" cy="100" r="35" className={`${status === 'thinking' ? 'fill-purple-500/60' : 'fill-blue-400/90'} animate-blob-slow`} />
+                <circle cx="100" cy="100" r="30" className={`${status === 'thinking' ? 'fill-indigo-500/60' : 'fill-indigo-400/80'} animate-blob-fast`} />
+                <circle cx="100" cy="100" r="32" className="fill-white/40 animate-blob-medium" />
+              </>
+            )}
+          </g>
+        </svg>
+
+        {status === 'ready' && !error && (
+          <div className="absolute inset-0 flex items-center justify-center">
+            <div className="w-20 h-20 rounded-full border border-white/20 animate-ping opacity-10" />
+          </div>
+        )}
+      </div>
+
+      <div className="absolute bottom-12 group flex flex-col items-center gap-6">
+        <div className="flex items-center gap-8 opacity-0 group-hover:opacity-100 transition-all duration-500 transform translate-y-4 group-hover:translate-y-0">
+          <button onClick={(e) => { e.stopPropagation(); setVisionMode(!visionMode); }} className={`p-4 rounded-full border border-white/5 bg-white/5 backdrop-blur-xl transition-all ${visionMode ? 'text-indigo-400 border-indigo-400/20' : 'text-white/40 hover:text-white'}`}><Camera size={20} /></button>
+          <button onClick={(e) => { e.stopPropagation(); setIsMuted(!isMuted); }} className={`p-4 rounded-full border border-white/5 bg-white/5 backdrop-blur-xl transition-all ${isMuted ? 'text-red-500 border-red-500/20' : 'text-white/40 hover:text-white'}`}>{isMuted ? <MicOff size={20} /> : <Mic size={20} />}</button>
+          <button onClick={(e) => { e.stopPropagation(); handleReset(); }} className="p-4 rounded-full border border-white/5 bg-white/5 backdrop-blur-xl text-white/40 hover:text-white hover:bg-red-500/10 transition-all"><X size={20} /></button>
+        </div>
+        <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 opacity-30 group-hover:opacity-100 transition-opacity">
+           <Sparkles size={12} className="text-indigo-400" />
+           <span className="text-[10px] font-bold tracking-widest uppercase text-white/50">Voice Sync Enabled</span>
+        </div>
+      </div>
+
+      <style dangerouslySetInnerHTML={{ __html: `
+        @keyframes blob-slow { 0%, 100% { transform: translate(0, 0) scale(1) rotate(0deg); } 33% { transform: translate(30px, -20px) scale(1.2) rotate(10deg); } 66% { transform: translate(-20px, 30px) scale(0.8) rotate(-10deg); } }
+        @keyframes blob-medium { 0%, 100% { transform: translate(0, 0) scale(1); } 50% { transform: translate(-30px, -30px) scale(1.3); } }
+        @keyframes blob-fast { 0%, 100% { transform: translate(0, 0) scale(1.1); } 50% { transform: translate(20px, 20px) scale(0.9); } }
+        .animate-blob-slow { animation: blob-slow 12s ease-in-out infinite; transform-origin: center; }
+        .animate-blob-medium { animation: blob-medium 8s ease-in-out infinite; transform-origin: center; }
+        .animate-blob-fast { animation: blob-fast 4s ease-in-out infinite; transform-origin: center; }
+        .filter-goo { filter: url(#goo); }
+      `}} />
+    </div>
+  );
+};
+
+export default App;
