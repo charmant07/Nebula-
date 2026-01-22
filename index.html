@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nebula Voice Interface</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap');
+        body { font-family: 'Inter', sans-serif; background-color: #050505; }
+        
+        /* Custom Scrollbar hide */
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        // Custom Inline SVG Icons to replace Lucide dependency issues
+        const Icons = {
+          X: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>,
+          Mic: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>,
+          MicOff: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="2" x2="22" y1="2" y2="22"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" x2="12" y1="19" y2="22"/></svg>,
+          Camera: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></svg>,
+          Sparkles: ({ className, size = 20 }) => <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/><path d="M5 3v4"/><path d="M19 17v4"/><path d="M3 5h4"/><path d="M17 19h4"/></svg>,
+          Power: () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 2v10"/><path d="M18.4 6.6a9 9 0 1 1-12.77.04"/></svg>
+        };
+
+        const App = () => {
+          const [status, setStatus] = useState('idle');
+          const [isOutputMuted, setIsOutputMuted] = useState(false);
+          const [response, setResponse] = useState("");
+          const [error, setError] = useState(null);
+          const [conversationHistory, setConversationHistory] = useState(() => {
+            try {
+              const saved = localStorage.getItem('nebula-memory');
+              return saved ? JSON.parse(saved) : [];
+            } catch {
+              return [];
+            }
+          });
+          const [isWaitingForCheckIn, setIsWaitingForCheckIn] = useState(false);
+          const [lastCommand, setLastCommand] = useState(null);
+          const [contextTopic, setContextTopic] = useState(null);
+          const [pendingAction, setPendingAction] = useState(null);
+          const [visionMode, setVisionMode] = useState(false);
+
+          const apiKey = ""; // Insert your Gemini API Key here
+          const recognitionRef = useRef(null);
+          const wakeWordRecognitionRef = useRef(null);
+          const audioRef = useRef(null);
+          const silenceTimerRef = useRef(null);
+          const checkInTimerRef = useRef(null);
+          const errorTimeoutRef = useRef(null);
+          const isActiveRef = useRef(false);
+          const isWakeListeningRef = useRef(false);
+          
+          const isMainRecognitionActive = useRef(false);
+          const isWakeRecognitionActive = useRef(false);
+          
+          const videoRef = useRef(null);
+          const canvasRef = useRef(null);
+
+          const pcmToWav = (base64Pcm, sampleRate = 24000) => {
+            const binaryString = window.atob(base64Pcm);
+            const len = binaryString.length;
+            const bytes = new Uint8Array(len);
+            for (let i = 0; i < len; i++) bytes[i] = binaryString.charCodeAt(i);
+            const buffer = new ArrayBuffer(44 + bytes.length);
+            const view = new DataView(buffer);
+            view.setUint32(0, 0x52494646, false);
+            view.setUint32(4, 36 + bytes.length, true);
+            view.setUint32(8, 0x57415645, false);
+            view.setUint32(12, 0x666d7420, false);
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, 1, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true);
+            view.setUint32(36, 0x64617461, false);
+            view.setUint32(40, bytes.length, true);
+            for (let i = 0; i < bytes.length; i++) view.setUint8(44 + i, bytes[i]);
+            return new Blob([buffer], { type: 'audio/wav' });
+          };
+
+          const clearAllTimers = () => {
+            [silenceTimerRef, checkInTimerRef, errorTimeoutRef].forEach(ref => {
+              if (ref.current) {
+                clearTimeout(ref.current);
+                ref.current = null;
+              }
+            });
+          };
+
+          const setErrorWithTimeout = (msg) => {
+            setError(msg);
+            if (errorTimeoutRef.current) clearTimeout(errorTimeoutRef.current);
+            errorTimeoutRef.current = setTimeout(() => setError(null), 5000);
+          };
+
+          useEffect(() => {
+            if (visionMode) {
+              navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
+                .then(stream => { if (videoRef.current) videoRef.current.srcObject = stream; })
+                .catch(err => setErrorWithTimeout("Camera access denied"));
+            } else {
+              if (videoRef.current?.srcObject) {
+                videoRef.current.srcObject.getTracks().forEach(track => track.stop());
+                videoRef.current.srcObject = null;
+              }
+            }
+          }, [visionMode]);
+
+          const detectCommand = (text) => {
+            const lower = text.toLowerCase();
+            if (lower.includes('set alarm') || lower.includes('wake me')) {
+              const timeMatch = lower.match(/(\d{1,2})\s*(am|pm|o'clock)|(\d{1,2}):(\d{2})\s*(am|pm)?/i);
+              return { type: 'alarm', raw: text, intent: 'set_alarm', params: { time: timeMatch ? timeMatch[0] : null } };
+            }
+            if (lower.includes('timer') || lower.includes('countdown')) {
+              const durationMatch = lower.match(/(\d+)\s*(minute|min|second|sec|hour|hr)s?/i);
+              return { type: 'timer', raw: text, intent: 'set_timer', params: { duration: durationMatch ? `${durationMatch[1]} ${durationMatch[2]}` : null } };
+            }
+            if (lower.includes('remind me') || lower.includes('reminder')) {
+              const whatMatch = text.match(/remind me (?:to|about) (.+?)(?:\s+(?:at|in|on)|$)/i);
+              return { type: 'reminder', raw: text, intent: 'set_reminder', params: { what: whatMatch ? whatMatch[1] : null } };
+            }
+            if (lower.includes('search for') || lower.includes('look up') || lower.includes('google')) {
+              const queryMatch = text.match(/(?:search for|look up|google)\s+(.+)/i);
+              return { type: 'search', raw: text, intent: 'web_search', params: { query: queryMatch ? queryMatch[1] : null } };
+            }
+            if (lower.includes('weather') || lower.includes('temperature') || lower.includes('forecast')) {
+              return { type: 'weather', raw: text, intent: 'get_weather', params: {} };
+            }
+            if (lower.includes('yes') || lower.includes('yeah') || lower.includes('confirm') || lower.includes('correct')) return { type: 'confirm', raw: text, intent: 'confirm_action' };
+            if (lower.includes('no') || lower.includes('cancel') || lower.includes('never mind')) return { type: 'cancel', raw: text, intent: 'cancel_action' };
+            return null;
+          };
+
+          const executeAction = async (command) => {
+            try {
+              let result;
+              switch (command.type) {
+                case 'alarm': result = await { success: true, message: `Alarm set for ${command.params.time || '7 AM'}` }; break;
+                case 'timer': result = await { success: true, message: `Timer set for ${command.params.duration || '5 minutes'}` }; break;
+                case 'reminder': result = await { success: true, message: `Reminder: ${command.params.what || 'task'}` }; break;
+                case 'search': result = await { success: true, message: `Searching for "${command.params.query}"` }; break;
+                case 'weather': result = await { success: true, message: "It's 72°F and sunny" }; break;
+                default: result = { success: false, message: "Unknown command" };
+              }
+              return result;
+            } catch (err) {
+              return { success: false, message: "Action failed" };
+            }
+          };
+
+          const handleCommand = async (command) => {
+            setLastCommand(command);
+            if (command.type === 'confirm' && pendingAction) {
+              const result = await executeAction(pendingAction);
+              setPendingAction(null);
+              setResponse(result.message);
+              speakResponse(result.message);
+              return;
+            }
+            if (command.type === 'cancel' && pendingAction) {
+              setPendingAction(null);
+              setResponse("Okay, cancelled.");
+              speakResponse("Okay, cancelled.");
+              return;
+            }
+            const needsConfirmation = ['alarm', 'reminder'].includes(command.type);
+            if (needsConfirmation && command.params && Object.values(command.params).some(v => v)) {
+              setPendingAction(command);
+              const msgs = { alarm: `Set alarm for ${command.params.time}? Say yes.`, reminder: `Remind you to ${command.params.what}? Say yes.` };
+              const msg = msgs[command.type] || "Confirm?";
+              setResponse(msg);
+              speakResponse(msg);
+            } else if (needsConfirmation) {
+              const msgs = { alarm: "What time?", timer: "How long?", reminder: "Remind you about what?" };
+              const msg = msgs[command.type] || "Need more info.";
+              setResponse(msg);
+              speakResponse(msg);
+            } else {
+              const result = await executeAction(command);
+              setResponse(result.message);
+              speakResponse(result.message);
+            }
+          };
+
+          const startSilenceTimer = () => {
+            clearAllTimers();
+            silenceTimerRef.current = setTimeout(() => {
+              if (isActiveRef.current && !isWaitingForCheckIn) handleSilenceTimeout();
+            }, 60000);
+          };
+
+          const handleSilenceTimeout = () => {
+            if (!isActiveRef.current) return;
+            setIsWaitingForCheckIn(true);
+            setStatus('checking');
+            const msg = "Hey, you still there?";
+            setResponse(msg);
+            speakResponse(msg, true);
+            checkInTimerRef.current = setTimeout(() => handleEndConversation(), 30000);
+          };
+
+          const startListening = () => {
+            if (!isActiveRef.current || isMainRecognitionActive.current) return;
+            try {
+              if (recognitionRef.current) recognitionRef.current.start();
+            } catch (err) {
+              console.warn("Main recognition start conflict", err);
+            }
+          };
+
+          const startWakeWordListening = () => {
+            if (!isWakeListeningRef.current || isWakeRecognitionActive.current) return;
+            try {
+              if (wakeWordRecognitionRef.current) wakeWordRecognitionRef.current.start();
+            } catch (err) {
+              console.warn("Wake word recognition start conflict", err);
+            }
+          };
+
+          useEffect(() => {
+            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+            if (SpeechRecognition) {
+              recognitionRef.current = new SpeechRecognition();
+              recognitionRef.current.continuous = false;
+              recognitionRef.current.interimResults = false;
+              recognitionRef.current.lang = 'en-US';
+
+              recognitionRef.current.onstart = () => { isMainRecognitionActive.current = true; setStatus('listening'); };
+              recognitionRef.current.onend = () => { 
+                isMainRecognitionActive.current = false; 
+                if (isActiveRef.current && (status === 'listening' || status === 'active')) {
+                  setTimeout(() => startListening(), 300);
+                }
+              };
+
+              recognitionRef.current.onresult = (event) => {
+                const transcript = event.results[0][0].transcript;
+                clearAllTimers();
+                if (isWaitingForCheckIn) setIsWaitingForCheckIn(false);
+                const command = detectCommand(transcript);
+                if (command) handleCommand(command);
+                else getGeminiResponse(transcript);
+              };
+
+              recognitionRef.current.onerror = (event) => {
+                if (event.error === 'not-allowed') {
+                  setErrorWithTimeout("Mic access needed");
+                  handleEndConversation();
+                }
+              };
+
+              wakeWordRecognitionRef.current = new SpeechRecognition();
+              wakeWordRecognitionRef.current.continuous = true;
+              wakeWordRecognitionRef.current.interimResults = false;
+              wakeWordRecognitionRef.current.lang = 'en-US';
+
+              wakeWordRecognitionRef.current.onstart = () => { isWakeRecognitionActive.current = true; setStatus('wakeListen'); };
+              wakeWordRecognitionRef.current.onend = () => { 
+                isWakeRecognitionActive.current = false; 
+                if (isWakeListeningRef.current) setTimeout(() => startWakeWordListening(), 300);
+              };
+
+              wakeWordRecognitionRef.current.onresult = (event) => {
+                const transcript = event.results[event.results.length - 1][0].transcript.toLowerCase();
+                if (transcript.includes('hey nebula') || transcript.includes('nebula')) {
+                  isWakeListeningRef.current = false;
+                  wakeWordRecognitionRef.current?.stop();
+                  handleStartConversation();
+                }
+              };
+            }
+            return () => clearAllTimers();
+          }, [status]);
+
+          const speakResponse = async (text, isCheckIn = false) => {
+            if (isOutputMuted) {
+              if (!isCheckIn) startSilenceTimer();
+              if (isActiveRef.current) startListening();
+              return;
+            }
+            try {
+              const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  contents: [{ parts: [{ text: `Say naturally: ${text}` }] }],
+                  generationConfig: {
+                    responseModalities: ["AUDIO"],
+                    speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } } }
+                  }
+                })
+              });
+              const result = await res.json();
+              const pcmData = result.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+              if (pcmData) {
+                setStatus('speaking');
+                const wavBlob = pcmToWav(pcmData, 24000);
+                const audioUrl = URL.createObjectURL(wavBlob);
+                if (audioRef.current) {
+                  audioRef.current.src = audioUrl;
+                  audioRef.current.play();
+                  audioRef.current.onended = () => {
+                    URL.revokeObjectURL(audioUrl);
+                    if (isActiveRef.current) {
+                      if (!isCheckIn) startSilenceTimer();
+                      startListening();
+                    } else setStatus('idle');
+                  };
+                }
+              } else {
+                if (isActiveRef.current) startListening();
+              }
+            } catch (err) {
+              if (isActiveRef.current) startListening();
+            }
+          };
+
+          const getGeminiResponse = async (userInput) => {
+            setStatus('thinking');
+            setResponse("");
+            
+            let imageBase64 = null;
+            if (visionMode && canvasRef.current && videoRef.current) {
+              const context = canvasRef.current.getContext('2d');
+              canvasRef.current.width = videoRef.current.videoWidth;
+              canvasRef.current.height = videoRef.current.videoHeight;
+              context.drawImage(videoRef.current, 0, 0);
+              imageBase64 = canvasRef.current.toDataURL('image/png').split(',')[1];
+            }
+
+            const currentTurn = {
+              role: "user",
+              parts: [
+                { text: userInput },
+                ...(imageBase64 ? [{ inlineData: { mimeType: "image/png", data: imageBase64 } }] : [])
+              ]
+            };
+
+            const newHistory = [...conversationHistory, currentTurn];
+            
+            try {
+              const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  contents: newHistory,
+                  systemInstruction: { parts: [{ text: "You are Nebula, Patrick's AI assistant. Conversational and witty. Keep it 2-4 sentences. No markdown." }] },
+                  tools: [{ googleSearch: {} }]
+                })
+              });
+              const data = await res.json();
+              const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "I couldn't process that.";
+              const updatedHistory = [...newHistory, { role: "model", parts: [{ text: text }] }];
+              setConversationHistory(updatedHistory);
+              localStorage.setItem('nebula-memory', JSON.stringify(updatedHistory));
+              setResponse(text);
+              speakResponse(text);
+            } catch (err) {
+              setErrorWithTimeout("Connection issue");
+              if (isActiveRef.current) startListening();
+            }
+          };
+
+          const handleStartConversation = () => {
+            isWakeListeningRef.current = false;
+            wakeWordRecognitionRef.current?.stop();
+            isActiveRef.current = true;
+            startListening();
+            startSilenceTimer();
+          };
+
+          const handleEndConversation = () => {
+            isActiveRef.current = false;
+            isWakeListeningRef.current = false;
+            clearAllTimers();
+            try { recognitionRef.current?.stop(); } catch(e){}
+            try { wakeWordRecognitionRef.current?.stop(); } catch(e){}
+            if (audioRef.current) { audioRef.current.pause(); audioRef.current.currentTime = 0; }
+            setStatus('idle');
+            setResponse("");
+          };
+
+          const handleWakeWordMode = () => {
+            isWakeListeningRef.current = true;
+            startWakeWordListening();
+          };
+
+          return (
+            <div className="flex h-screen w-full bg-[#050505] text-white font-sans overflow-hidden items-center justify-center">
+              <audio ref={audioRef} className="hidden" />
+              <canvas ref={canvasRef} className="hidden" />
+              
+              <video 
+                ref={videoRef} 
+                autoPlay 
+                muted 
+                playsInline
+                className={`absolute inset-0 object-cover w-full h-full transition-opacity duration-1000 ${visionMode ? 'opacity-20 grayscale' : 'opacity-0'}`} 
+              />
+              
+              <div className={`absolute top-[12%] flex flex-col items-center transition-all ${status === 'idle' ? 'opacity-20' : 'opacity-100'}`}>
+                <p className="text-xs font-light tracking-[0.4em] uppercase text-white/60">
+                  {error || (status === 'idle' ? 'Dormant' : status === 'wakeListen' ? 'Say "Hey Nebula"' : status)}
+                </p>
+                {response && (status === 'speaking' || status === 'checking') && (
+                  <p className="mt-3 text-center max-w-sm text-white/40 italic text-sm leading-relaxed px-6">"{response}"</p>
+                )}
+              </div>
+
+              <div 
+                className="relative w-64 h-64 md:w-80 md:h-80 cursor-pointer" 
+                onClick={() => { if (status === 'idle') handleWakeWordMode(); else if (status === 'wakeListen') handleStartConversation(); }}
+              >
+                <div className={`absolute inset-0 rounded-full blur-[120px] transition-all duration-1000 scale-150 ${
+                  status === 'speaking' ? 'bg-blue-500/30' : 
+                  status === 'listening' ? 'bg-indigo-500/30' : 
+                  status === 'thinking' ? 'bg-purple-500/20' : 
+                  status === 'wakeListen' ? 'bg-green-500/20' : 'bg-transparent'
+                }`} />
+                <svg className="w-full h-full" viewBox="0 0 200 200">
+                  <defs>
+                    <filter id="goo"><feGaussianBlur in="SourceGraphic" stdDeviation="8" result="blur" /><feColorMatrix in="blur" mode="matrix" values="1 0 0 0 0  0 1 0 0 0  0 0 1 0 0  0 0 0 19 -9" /></filter>
+                  </defs>
+                  <g filter="url(#goo)">
+                    <circle cx="100" cy="100" r="40" className={`transition-all duration-1000 ${status === 'idle' ? 'fill-white opacity-5 scale-75' : 'fill-white opacity-100'}`} />
+                    {status !== 'idle' && (
+                      <>
+                        <circle cx="100" cy="100" r="35" className="fill-blue-400/90 animate-blob-slow" />
+                        <circle cx="100" cy="100" r="30" className="fill-indigo-400/80 animate-blob-fast" />
+                      </>
+                    )}
+                  </g>
+                </svg>
+              </div>
+
+              {(status !== 'idle' && status !== 'wakeListen') && (
+                <button onClick={handleEndConversation} className="absolute top-8 right-8 p-4 rounded-full bg-red-500/5 border border-red-500/10 text-red-400/50 hover:text-red-400 transition-all"><Icons.Power /></button>
+              )}
+
+              <div className="absolute bottom-12 flex flex-col items-center gap-6">
+                <div className="flex items-center gap-8 opacity-50 hover:opacity-100 transition-all">
+                  <button onClick={() => setIsOutputMuted(!isOutputMuted)} className={`p-4 rounded-full border border-white/5 bg-white/5 backdrop-blur-xl ${isOutputMuted ? 'text-red-500' : 'text-white/40 hover:text-white'}`}>{isOutputMuted ? <Icons.MicOff /> : <Icons.Mic />}</button>
+                  <button onClick={() => setVisionMode(!visionMode)} className={`p-4 rounded-full border border-white/5 bg-white/5 backdrop-blur-xl ${visionMode ? 'text-indigo-400' : 'text-white/40 hover:text-white'}`}><Icons.Camera /></button>
+                  <button onClick={() => { handleEndConversation(); setConversationHistory([]); localStorage.removeItem('nebula-memory'); }} className="p-4 rounded-full border border-white/5 bg-white/5 text-white/40 hover:text-red-400"><Icons.X /></button>
+                </div>
+                <div className="flex items-center gap-2 px-4 py-2 rounded-full bg-white/5 border border-white/10 opacity-30"><Icons.Sparkles size={12} className="text-cyan-400" /><span className="text-[10px] font-bold tracking-[0.2em] uppercase text-white/40">Nebula Intelligence Core</span></div>
+              </div>
+
+              <style dangerouslySetInnerHTML={{ __html: `
+                @keyframes blob-slow { 0%, 100% { transform: translate(0, 0) scale(1); } 33% { transform: translate(20px, -15px) scale(1.1); } 66% { transform: translate(-15px, 20px) scale(0.9); } }
+                @keyframes blob-fast { 0%, 100% { transform: translate(0, 0) scale(1.1); } 50% { transform: translate(15px, 15px) scale(0.9); } }
+                .animate-blob-slow { animation: blob-slow 10s ease-in-out infinite; transform-origin: center; }
+                .animate-blob-fast { animation: blob-fast 6s ease-in-out infinite; transform-origin: center; }
+              `}} />
+            </div>
+          );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
