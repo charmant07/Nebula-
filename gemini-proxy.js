@@ -1,10 +1,10 @@
 // A simple Netlify Function that proxies requests to Google's Generative Language API.
-// It expects POST bodies from the client and a query parameter `model` (e.g. ?model=gemini-2.5-flash-preview-09-2025).
-// Put your real API key into Netlify env var GEMINI_API_KEY (do NOT commit the key to the repo).
+// Put this file in your repo at netlify/functions/gemini-proxy.js
+// Set GEMINI_API_KEY in Netlify environment variables (do NOT commit the key).
 
 exports.handler = async (event) => {
   const headers = {
-    "Access-Control-Allow-Origin": "*", // during testing allow all; tighten to your domain in production
+    "Access-Control-Allow-Origin": "*", // during testing allow all; replace with your origin in production
     "Access-Control-Allow-Headers": "Content-Type",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
   };
@@ -23,25 +23,25 @@ exports.handler = async (event) => {
       };
     }
 
-    // Choose model from query param; default to a text model if not supplied
     const model = (event.queryStringParameters && event.queryStringParameters.model)
       || "gemini-2.5-flash-preview-09-2025";
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${apiKey}`;
 
-    // Forward client's body directly
+    // Forward client's body unchanged
     const fetchRes = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: event.body || "{}"
     });
 
-    const text = await fetchRes.text(); // forward raw text (JSON) back to client
-    // return the status and body received from Google
+    const respText = await fetchRes.text();
+
+    // Forward response status and content-type header to client
     return {
       statusCode: fetchRes.status,
       headers: { ...headers, "Content-Type": fetchRes.headers.get('content-type') || 'application/json' },
-      body: text
+      body: respText
     };
   } catch (err) {
     return { statusCode: 500, headers, body: JSON.stringify({ error: err.message }) };
