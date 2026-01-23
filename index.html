@@ -301,17 +301,18 @@
               return;
             }
             try {
-              const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  contents: [{ parts: [{ text: `Say naturally: ${text}` }] }],
-                  generationConfig: {
-                    responseModalities: ["AUDIO"],
-                    speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } } }
-                  }
-                })
-              });
+                const ttsUrl = '/.netlify/functions/gemini-proxy?model=gemini-2.5-flash-preview-tts';
+                const res = await fetch(ttsUrl, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    contents: [{ parts: [{ text: `Say naturally: ${text}` }] }],
+                    generationConfig: {
+                      responseModalities: ["AUDIO"],
+                      speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Aoede" } } }
+                    }
+                  })
+                });
               const result = await res.json();
               const pcmData = result.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
               if (pcmData) {
@@ -361,15 +362,16 @@
             const newHistory = [...conversationHistory, currentTurn];
             
             try {
-              const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  contents: newHistory,
-                  systemInstruction: { parts: [{ text: "You are Nebula, Patrick's AI assistant. Conversational and witty. Keep it 2-4 sentences. No markdown." }] },
-                  tools: [{ googleSearch: {} }]
-                })
-              });
+                const genUrl = '/.netlify/functions/gemini-proxy?model=gemini-2.5-flash-preview-09-2025';
+                const res = await fetch(genUrl, {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({
+                    contents: newHistory,
+                    systemInstruction: { parts: [{ text: "You are Nebula, Patrick's AI assistant. Conversational and witty. Keep it 2-4 sentences. No markdown." }] },
+                    tools: [{ googleSearch: {} }]
+                  })
+                });
               const data = await res.json();
               const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "I couldn't process that.";
               const updatedHistory = [...newHistory, { role: "model", parts: [{ text: text }] }];
